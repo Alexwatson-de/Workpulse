@@ -5,12 +5,15 @@ export const roles = ['employee', 'manager', 'admin'] as const;
 export type Role = typeof roles[number];
 export const reportStatuses = ['Draft', 'Submitted', 'Under Review', 'Changes Requested', 'Approved'] as const;
 export type Status = typeof reportStatuses[number];
-export interface UserProfile {
+export interface Removal { deletedAt?: string; deletedBy?: string; deletionReason?: string }
+export const removableCollections = ['users', 'projects', 'reports', 'teams', 'departments'] as const;
+export type RemovableCollection = typeof removableCollections[number];
+export interface UserProfile extends Removal {
   id: string; fullName: string; email: string; employeeId: string; departmentId: string;
   teamId: string; managerId: string; role: Role; active: boolean; createdAt: string;
 }
-export interface Group { id: string; name: string }
-export interface Project {
+export interface Group extends Removal { id: string; name: string }
+export interface Project extends Removal {
   id: string; name: string; description: string; ownerId: string; teamId: string;
   memberIds: string[]; startDate: string; endDate: string;
   status: 'Planned' | 'Active' | 'On Hold' | 'Completed' | 'Archived';
@@ -44,7 +47,7 @@ export const reportInputSchema = z.object({
   blockers: text, dependencies: text, nextDay: text, miscellaneous: text, managerNotes: text,
 });
 export type ReportInput = z.infer<typeof reportInputSchema>;
-export interface Report extends ReportInput {
+export interface Report extends ReportInput, Removal {
   id: string; employeeId: string; employeeName: string; teamId: string; departmentId: string; managerId: string;
   projectIds: string[]; status: Status; version: number; createdAt: string; updatedAt: string;
   submittedAt: string; late: boolean; feedback: string; reviewerId: string;
@@ -74,8 +77,8 @@ export const wordCount = (s: string) => s.trim().split(/\s+/).filter(Boolean).le
 export function workingDay(day: string, policy: Policy) { return policy.workingDays.includes(new Date(`${day}T12:00:00Z`).getUTCDay()) && !policy.holidays.includes(day); }
 export function previousWorkingDay(day: string, policy: Policy) { const d = new Date(`${day}T12:00:00Z`); for (let i = 0; i < 740; i++) { d.setUTCDate(d.getUTCDate() - 1); const v = d.toISOString().slice(0, 10); if (workingDay(v, policy)) return v; } throw new Error('No working day configured'); }
 export function canReadReport(user: UserProfile, report: Pick<Report, 'employeeId' | 'managerId' | 'teamId'>) { return user.active && (user.role === 'admin' || report.employeeId === user.id || user.role === 'manager' && report.managerId === user.id); }
-export function canReview(user: UserProfile, report: Report) { return user.active && report.employeeId !== user.id && (user.role === 'admin' || user.role === 'manager' && report.managerId === user.id); }
-export function canEdit(user: UserProfile, report: Report, policy: Policy) { return user.active && report.employeeId === user.id && (['Draft', 'Changes Requested'].includes(report.status) || policy.editSubmitted && report.status === 'Submitted'); }
+export function canReview(user: UserProfile, report: Report) { return user.active && !report.deletedAt && report.employeeId !== user.id && (user.role === 'admin' || user.role === 'manager' && report.managerId === user.id); }
+export function canEdit(user: UserProfile, report: Report, policy: Policy) { return user.active && !report.deletedAt && report.employeeId === user.id && (['Draft', 'Changes Requested'].includes(report.status) || policy.editSubmitted && report.status === 'Submitted'); }
 export function validateReport(input: ReportInput, policy: Policy, projects: Project[], employeeId: string, submit: boolean, now = new Date()) {
   const errors: string[] = []; const today = zonedNow(policy.timezone, now).date;
   const days = Math.round((Date.parse(today) - Date.parse(input.date)) / 86400000);
@@ -89,7 +92,7 @@ export function validateReport(input: ReportInput, policy: Policy, projects: Pro
   if (submit && (!leave || policy.leaveRequiresHours) && (!input.entries.length || h.regular + h.additional <= 0)) errors.push('Add at least one project and report positive work hours.');
   for (const [i, e] of input.entries.entries()) {
     const p = projects.find(p => p.id === e.projectId);
-    if (!p || !p.memberIds.includes(employeeId) || p.status === 'Archived' && !policy.allowArchived) errors.push(`Project ${i + 1} is not an available assignment.`);
+    if (!p || p.deletedAt || !p.memberIds.includes(employeeId) || p.status === 'Archived' && !policy.allowArchived) errors.push(`Project ${i + 1} is not an available assignment.`);
     if (p && (input.date < p.startDate || p.endDate && input.date > p.endDate)) errors.push(`Project ${i + 1} is outside its assignment dates.`);
     if (submit && wordCount(e.description) < policy.descriptionWords) errors.push(`Project ${i + 1} description needs at least ${policy.descriptionWords} words.`);
     if (submit && policy.requiredFields.includes('deliverableUrl') && !e.deliverableUrl) errors.push(`Project ${i + 1} needs a deliverable URL.`);
@@ -102,6 +105,7 @@ export const emptyReport = (date: string, attendance = 'In Office'): ReportInput
 export function csvCell(value: unknown) { let s = String(value ?? ''); if (/^[\s]*[=+\-@\t\r]/.test(s)) s = `'${s}`; return `"${s.replace(/"/g, '""')}"`; }
 export function toCsv(rows: unknown[][]) { return '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n'); }
 export function exportReports(reports: Report[]) {
+  reports = reports.filter(r => !r.deletedAt);
   return toCsv([['Employee', 'Date', 'Attendance declaration', 'Project ID', 'Regular hours', 'Additional hours', 'Work description', 'Questions', 'Secondary task', 'Secondary regular hours', 'Submitted at', 'Status', 'Feedback'], ...reports.flatMap(r => (r.entries.length ? r.entries : [null]).map((e, i) => [r.employeeName, r.date, r.attendance, e?.projectId ?? '', e?.regularHours ?? 0, e?.additionalHours ?? 0, e?.description ?? '', e?.questionCount ?? 0, i === 0 && r.secondary.assigned ? r.secondary.name : '', i === 0 && r.secondary.assigned ? r.secondary.hours : 0, r.submittedAt, r.status, r.feedback]))]);
 }
 // RFC4180 parser with quoted newlines; CSV imports are previewed before trusted invitations.

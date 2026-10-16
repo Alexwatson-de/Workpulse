@@ -64,9 +64,29 @@ try {
   await page.setViewportSize({ width: 390, height: 844 }); if (!await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)) throw new Error('Mobile horizontal overflow.');
   if (errors.length) throw new Error(`Browser runtime errors: ${errors.join('; ')}`);
   console.log('PASS: production mobile layout and zero uncaught browser runtime errors.');
-  await call(adminToken, 'user.save', { id: employee.id, profile: { ...employee, active: false } });
+  const removal = { collection: 'reports', id: reportId, confirmation: `${report.employeeName} · ${report.date}`, reason: 'Synthetic lifecycle verification; not employee work.' };
+  await call(employeeToken, 'record.remove', removal, 403);
+  await call(adminToken, 'record.remove', removal);
+  const removedReport = (await db.doc(`reports/${reportId}`).get()).data()!;
+  if (!removedReport.deletedAt) throw new Error('Live report removal not persisted.');
+  await call(adminToken, 'record.restore', { ...removal, deletedAt: removedReport.deletedAt });
+  if ((await db.doc(`reports/${reportId}`).get()).data()!.deletedAt) throw new Error('Live report restore failed.');
+  await call(adminToken, 'record.remove', removal);
+  const projectRemoval = { collection: 'projects', id: projectId, confirmation: `[SMOKE TEST ${run}] Deployment verification`, reason: 'Synthetic project lifecycle verification.' };
+  await call(adminToken, 'record.remove', projectRemoval);
+  const removedProject = (await db.doc(`projects/${projectId}`).get()).data()!;
+  await call(adminToken, 'record.restore', { ...projectRemoval, deletedAt: removedProject.deletedAt });
+  const restoredProject = (await db.doc(`projects/${projectId}`).get()).data()!;
+  if (restoredProject.status !== 'Archived' || restoredProject.memberIds.length) throw new Error('Project restored with unsafe assignments.');
+  const employeeRemoval = { collection: 'users', id: employee.id, confirmation: employee.fullName, reason: 'Synthetic account lifecycle verification.' };
+  await call(adminToken, 'record.remove', employeeRemoval);
+  const removedEmployee = (await db.doc(`users/${employee.id}`).get()).data()!;
+  await call(employeeToken, 'user.profile', { fullName: 'Removed account bypass' }, 403);
+  await call(adminToken, 'record.restore', { ...employeeRemoval, deletedAt: removedEmployee.deletedAt });
+  if ((await db.doc(`users/${employee.id}`).get()).data()!.active) throw new Error('Employee restored with login access.');
+  console.log('PASS: live admin removal/restoration of synthetic report, project and employee; history retained and safe defaults confirmed.');
   await call(employeeToken, 'user.profile', { fullName: 'Inactive attempt' }, 403);
-  console.log('PASS: deactivated employee denied by live API.');
+  console.log('PASS: removed/restored inactive employee denied by live API.');
 } finally {
   if (projectId && adminToken) {
     const s = await db.doc(`projects/${projectId}`).get();

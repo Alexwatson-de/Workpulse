@@ -26,6 +26,20 @@ Only production has cloud environment variables. Preview deployments need separa
 - Organization policy editor; report monitoring/filtering; daily/weekly/monthly analytics, attendance distributions, hours, question counts, project participation, missing/late and review statistics; Excel-compatible CSV exports with spreadsheet-formula protection.
 - Recipient-only notifications and persistent preferences. Deadline/missing reminders respect timezone, working days and holidays, are deduplicated, and refresh every five minutes while the tab is visible.
 - Responsive sidebar, mobile navigation, keyboard focus-trapped dialogs, accessible labels, validation alerts, toasts, skeletons, empty states and real database-derived metrics.
+- Reference-inspired Frost theme: blue/lilac glass canvas, dark ink, cobalt focus card, rounded panels, a 7/14-day activity view, team shortcuts, pastel project tiles and a contextual right rail. All tiles/actions are wired to real authorized records. Dialogs are rendered outside transformed cards, with the background inert and keyboard focus contained.
+
+## Admin removal and recovery
+
+Use **Remove** beside a record in **Employees**, **Projects**, **All reports**, or **Settings > Teams / Departments**. The administrator must enter a reason and type the exact record name. **Recycle Bin** in the admin sidebar lists removed records by type and supports restoration. No records are automatically removed by this release.
+
+- Removal is recoverable, not permanent erasure. It stores `deletedAt`, `deletedBy`, and `deletionReason` and appends an immutable audit event; restoration is audited too. Only the trusted API can mutate these fields. Managers and employees cannot use removal/restoration operations.
+- Employees: access is denied immediately by the profile's inactive state, project memberships are removed, and normal directory entries are hidden. Existing report history and the Firebase Auth identity are retained. Reassign direct reports and owned projects first. An admin cannot remove their own account; concurrent operations cannot remove the acting administrator and then use stale privileges.
+- Projects: removed from normal project views and selectors, memberships cleared, existing reporting history preserved. Removed projects cannot be reused even when the policy allows archived projects.
+- Reports: excluded from normal history, dashboards, analytics and exports, with previous versions/comments preserved. The employee/date ID stays reserved; restoration is required instead of creating a duplicate. Existing authorized readers can still inspect a preserved report by direct link; removal is not a confidentiality-revocation operation.
+- Teams/departments: first reassign or remove associated users/projects. Historical report references remain intact.
+- Restore employees as **inactive employees**, with no team/department/manager assignment; administrators explicitly review role and activation afterward. Restore projects **archived and unassigned**, with no automatic return of old members. Restore reports with another revision snapshot.
+- A removal handles at most 150 memberships/project assignments atomically. Larger cases require reducing assignments first; the server refuses rather than partially removing. Recycle Bin lists the latest 500 removed records per type. Ordinary list query limits include removed documents and still show truncation warnings; no destructive migration or new composite indexes are required.
+- Permanent account/data erasure, audit deletion, and a bulk empty-bin action are intentionally not offered. These need a separate retention/privacy procedure; removing an account from WorkPulse is not deleting its Firebase identity.
 
 ## Run locally
 
@@ -103,7 +117,7 @@ Managers are deliberately restricted to their direct reporting line, not everyon
 
 ## Tests
 
-Local verification on 2026-10-16: **90 tests passed** — 48 domain/HTTP boundary tests, 16 Firestore rule tests, 16 backend emulator tests, and 10 desktop/mobile browser workflows. TypeScript and the production build passed. Lockfile installation validation passed. The runtime dependency audit reported zero vulnerabilities; upstream development-tool advisories remain. This is local/emulator evidence, not a production deployment or a security certification.
+Local verification on 2026-10-16: **111 tests passed** — 48 domain/HTTP boundary tests, 16 Firestore rule tests, 31 backend emulator tests (including 15 removal/recovery tests), and 16 desktop/mobile browser workflows (including six lifecycle/theme checks). TypeScript and the production build passed. Lockfile installation validation passed. The runtime dependency audit reported zero vulnerabilities; upstream development-tool advisories remain. This is local/emulator evidence, not a production deployment or a security certification.
 
 ```sh
 npm run check                  # Domain tests + TypeScript + production build

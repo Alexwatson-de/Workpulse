@@ -21,7 +21,7 @@ export async function api<T = Record<string, unknown>>(action: string, payload: 
   unconfirmedRequests.set(signature, retryId);
   const token = await auth.currentUser.getIdToken();
   let res: Response;
-  try { res = await fetch('/api/platform', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ action, payload, requestId: retryId }) }); }
+  try { res = await fetch('/api/platform', { method: 'POST', signal: AbortSignal.timeout(25000), headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ action, payload, requestId: retryId }) }); }
   catch { throw new Error('Network unavailable. Your changes have not been confirmed. Keep this page open and retry.'); }
   const body = await res.json().catch(() => ({ error: 'API unavailable. Start the Vercel API locally or check the deployment.' }));
   if (!res.ok || body.error) throw new Error(body.error || 'Operation failed.'); unconfirmedRequests.delete(signature); return body;
@@ -35,7 +35,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       stopProfile(); set({ identity, user: null, loading: !!identity, error: '' });
       if (identity) stopProfile = onSnapshot(doc(db!, 'users', identity.uid), s => {
         const user = s.exists() ? { ...s.data(), id: s.id } as UserProfile : null;
-        set({ identity, user: user?.active ? user : null, loading: false, error: !user ? 'This account has not been invited. Contact your administrator.' : !user.active ? 'Your account is inactive. Contact your administrator.' : '' });
+        set({ identity, user: user?.active && !user.deletedAt ? user : null, loading: false, error: !user ? 'This account has not been invited. Contact your administrator.' : user.deletedAt ? 'Your account has been removed. Contact your administrator.' : !user.active ? 'Your account is inactive. Contact your administrator.' : '' });
       }, () => set({ identity, user: null, loading: false, error: 'Could not load your employee profile. Check permissions or contact your administrator.' }));
     }); return () => { stop(); stopProfile(); };
   }, []); return <SessionContext.Provider value={session}>{children}</SessionContext.Provider>;
@@ -60,7 +60,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!user || !db) return; const stops: (() => void)[] = []; const loaded = new Set<string>(); let count = 0; setValues({}); setError('');
     const listen = (key: string, name: string, constraints: QueryConstraint[] = []) => {
-      count++; stops.push(onSnapshot(query(collection(db!, name), ...constraints, limit(1000)), snap => { setValues(v => ({ ...v, [key]: snap.docs.map(d => ({ ...d.data(), id: d.id })) })); loaded.add(key); setPending(count - loaded.size); }, e => { setError(`Database query failed (${name}): ${e.message}`); loaded.add(key); setPending(count - loaded.size); }));
+      count++; stops.push(onSnapshot(query(collection(db!, name), ...constraints, limit(1000)), snap => { setValues(v => ({ ...v, [`${key}Limit`]: snap.size === 1000 ? [true] : [], [key]: snap.docs.filter(d => !d.data().deletedAt).map(d => ({ ...d.data(), id: d.id })) })); loaded.add(key); setPending(count - loaded.size); }, e => { setError(`Database query failed (${name}): ${e.message}`); loaded.add(key); setPending(count - loaded.size); }));
     };
     const dates = [where('date', '>=', range.from), where('date', '<=', range.to), orderBy('date', 'desc')];
     listen('reports', 'reports', [...(user.role === 'admin' ? [] : [where(user.role === 'manager' ? 'managerId' : 'employeeId', '==', user.id)]), ...dates]);
@@ -76,6 +76,6 @@ export function DataProvider({ children }: { children: ReactNode }) {
   }, [user, range.from, range.to]);
   useEffect(() => { if (!user) return; const refresh = () => { if (document.visibilityState === 'visible' && navigator.onLine) api('notifications.refresh', {}).catch(() => {}); }; refresh(); const timer = setInterval(refresh, 300000); document.addEventListener('visibilitychange', refresh); return () => { clearInterval(timer); document.removeEventListener('visibilitychange', refresh); }; }, [user]);
   const merge = <T extends { id: string }>(...lists: T[][]) => [...new Map(lists.flat().map(v => [v.id, v])).values()];
-  const value: Data = { reports: merge((values.reports ?? []) as Report[], (values.ownReports ?? []) as Report[]), projects: merge((values.projects ?? []) as Project[], (values.ownedProjects ?? []) as Project[]), users: merge((values.users ?? []) as UserProfile[], user ? [user] : []), teams: (values.teams ?? []) as Group[], departments: (values.departments ?? []) as Group[], notices: (values.notices ?? []) as Notice[], policy, loading: pending > 0, error, ...range, setRange: (from, to) => { if (!from || !to || from > to || (Date.parse(to) - Date.parse(from)) / 86400000 > 366) { setError('Choose a valid date range of at most 366 days.'); return; } setRangeState({ from, to }); }, capped: Object.values(values).some(v => v.length >= 1000) };
+  const value: Data = { reports: merge((values.reports ?? []) as Report[], (values.ownReports ?? []) as Report[]), projects: merge((values.projects ?? []) as Project[], (values.ownedProjects ?? []) as Project[]), users: merge((values.users ?? []) as UserProfile[], user ? [user] : []), teams: (values.teams ?? []) as Group[], departments: (values.departments ?? []) as Group[], notices: (values.notices ?? []) as Notice[], policy, loading: pending > 0, error, ...range, setRange: (from, to) => { if (!from || !to || from > to || (Date.parse(to) - Date.parse(from)) / 86400000 > 366) { setError('Choose a valid date range of at most 366 days.'); return; } setRangeState({ from, to }); }, capped: Object.entries(values).some(([key, v]) => key.endsWith('Limit') && v.length > 0) };
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
 }

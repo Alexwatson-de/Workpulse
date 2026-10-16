@@ -3,7 +3,7 @@ import { getAuth } from 'firebase-admin/auth';
 import { FieldValue, getFirestore, type Transaction } from 'firebase-admin/firestore';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { canEdit, canReview, defaultPolicy, policySchema, profileSchema, projectSchema, reportInputSchema, validateReport, workingDay, zonedNow, type Policy, type Project, type Report, type UserProfile } from '../shared/domain.js';
+import { canEdit, canReview, defaultPolicy, policySchema, profileSchema, projectSchema, reportInputSchema, removableCollections, validateReport, workingDay, zonedNow, type Policy, type Project, type Report, type UserProfile } from '../shared/domain.js';
 
 // Admin credentials are server-only. No API can choose its Firebase target from user input.
 export function services() {
@@ -21,7 +21,7 @@ export async function actor(token: string) {
   const { auth, db } = services();
   const identity = await auth.verifyIdToken(token, true).catch(() => { throw new HttpError(401, 'Sign in again to continue.'); });
   const snap = await db.doc(`users/${identity.uid}`).get();
-  insist(snap.exists && snap.data()?.active === true, 403, 'Your account is not activated or has been deactivated. Contact your administrator.');
+  insist(snap.exists && snap.data()?.active === true && !snap.data()?.deletedAt, 403, 'Your account is not activated or has been deactivated. Contact your administrator.');
   return { ...snap.data(), id: identity.uid } as UserProfile;
 }
 function audit(tx: Transaction, actorId: string, action: string, target: string, detail: Record<string, unknown> = {}) {
@@ -43,7 +43,7 @@ export async function dispatch(user: UserProfile, raw: unknown) {
   async function transaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T> {
     return db.runTransaction(async tx => {
       const [op, freshActor] = await Promise.all([tx.get(operationRef), tx.get(db.doc(`users/${user.id}`))]);
-      insist(freshActor.exists && freshActor.data()!.active === true && freshActor.data()!.role === user.role, 403, 'Permissions changed. Reload the application.');
+      insist(freshActor.exists && freshActor.data()!.active === true && !freshActor.data()!.deletedAt && freshActor.data()!.role === user.role, 403, 'Permissions changed. Reload the application.');
       if (op.exists) { insist(op.data()!.fingerprint === fingerprint, 409, 'Retry key was already used for a different request.'); return op.data()!.result as T; }
       const result = await fn(tx); tx.create(operationRef, { userId: user.id, fingerprint, result, createdAt: now() }); return result;
     });
@@ -96,12 +96,13 @@ export async function dispatch(user: UserProfile, raw: unknown) {
     const p = z.object({ id: idSchema.optional(), project: projectSchema }).parse(payload); const id = p.id ?? randomUUID();
     return transaction(async tx => {
       const ref = db.doc(`projects/${id}`); const old = await tx.get(ref);
+      insist(!old.data()?.deletedAt, 409, 'Restore this project from the Recycle Bin before editing.');
       insist(user.role === 'admin' || p.project.ownerId === user.id && p.project.teamId === user.teamId && (!old.exists || old.data()!.ownerId === user.id), 403, 'Managers can manage only their own team projects.');
       const memberIds = [...new Set(p.project.memberIds)]; const checkedIds = [...new Set([...memberIds, p.project.ownerId].filter(Boolean))];
       const roster = await Promise.all(checkedIds.map(uid => tx.get(db.doc(`users/${idSchema.parse(uid)}`))));
       const team = p.project.teamId ? await tx.get(db.doc(`teams/${idSchema.parse(p.project.teamId)}`)) : null;
-      insist(!p.project.teamId || team?.exists, 422, 'Select an existing team.');
-      insist(roster.every(s => s.exists && s.data()!.active && (user.role === 'admin' || s.id === user.id || s.data()!.managerId === user.id)), 403, 'Project contains unavailable or unauthorized members.');
+      insist(!p.project.teamId || team?.exists && !team.data()?.deletedAt, 422, 'Select an existing team.');
+      insist(roster.every(s => s.exists && s.data()!.active && !s.data()!.deletedAt && (user.role === 'admin' || s.id === user.id || s.data()!.managerId === user.id)), 403, 'Project contains unavailable or unauthorized members.');
       const updated = { ...p.project, memberIds, id, updatedAt: now(), createdAt: old.data()?.createdAt ?? now() };
       const previous: string[] = old.data()?.memberIds ?? [];
       const assignments = await Promise.all(memberIds.map(uid => tx.get(db.doc(`memberships/${id}_${uid}`))));
@@ -142,23 +143,85 @@ export async function dispatch(user: UserProfile, raw: unknown) {
     });
   }
   insist(user.role === 'admin', 403, 'Administrator permission required.');
+  // Recoverable deletion: preserve report/revision/audit evidence, never cascade-purge it.
+  // Dependency queries and changes share a transaction with all normal assignment writes.
+  if (action === 'record.remove' || action === 'record.restore') {
+    const p = z.object({ collection: z.enum(removableCollections), id: idSchema,
+      confirmation: z.string().min(1).max(300), reason: z.string().trim().min(3).max(500),
+      deletedAt: z.string().optional() }).parse(payload);
+    return transaction(async tx => {
+      const ref = db.doc(`${p.collection}/${p.id}`); const snapshot = await tx.get(ref);
+      insist(snapshot.exists, 404, 'Record no longer exists.'); const data = snapshot.data()!;
+      const label = p.collection === 'users' ? data.fullName : p.collection === 'reports' ? `${data.employeeName} · ${data.date}` : data.name;
+      insist(p.confirmation === label, 422, 'Confirmation must exactly match the displayed record name.');
+      insist(p.collection !== 'users' || p.id !== user.id, 409, 'You cannot remove or restore your own account.');
+      if (action === 'record.restore') {
+        insist(data.deletedAt && p.deletedAt === data.deletedAt, 409, 'The removal has changed or this record is already restored. Reload the Recycle Bin.');
+        const patch: Record<string, unknown> = { deletedAt: FieldValue.delete(), deletedBy: FieldValue.delete(), deletionReason: FieldValue.delete(), restoredAt: now(), restoredBy: user.id };
+        // Never silently grant login access, roles, old memberships or reporting lines.
+        if (p.collection === 'users') Object.assign(patch, { active: false, role: 'employee', managerId: '', teamId: '', departmentId: '' });
+        if (p.collection === 'projects') Object.assign(patch, { status: 'Archived', memberIds: [], ownerId: '', teamId: '' });
+        if (p.collection === 'reports') {
+          tx.create(ref.collection('revisions').doc(String(data.version)), { version: data.version, report: data, actorId: user.id, action: 'Restored', createdAt: now() });
+          Object.assign(patch, { version: data.version + 1, updatedAt: now() });
+        }
+        tx.update(ref, patch); audit(tx, user.id, 'record.restored', ref.path, { reason: p.reason, label }); return { ok: true };
+      }
+      insist(!data.deletedAt, 409, 'This record is already in the Recycle Bin.');
+      const patch: Record<string, unknown> = { deletedAt: now(), deletedBy: user.id, deletionReason: p.reason };
+      let memberships: FirebaseFirestore.QueryDocumentSnapshot[] = [];
+      let projects: FirebaseFirestore.QueryDocumentSnapshot[] = [];
+      if (p.collection === 'users') {
+        const [reportsTo, owned, assigned, membershipRows] = await Promise.all([
+          tx.get(db.collection('users').where('managerId', '==', p.id).limit(201)),
+          tx.get(db.collection('projects').where('ownerId', '==', p.id).limit(201)),
+          tx.get(db.collection('projects').where('memberIds', 'array-contains', p.id).limit(151)),
+          tx.get(db.collection('memberships').where('userId', '==', p.id).limit(151))]);
+        insist(!reportsTo.docs.some(d => !d.data().deletedAt) && reportsTo.size < 201, 409, 'Reassign this manager’s direct reports before removing the account.');
+        insist(!owned.docs.some(d => !d.data().deletedAt) && owned.size < 201, 409, 'Reassign or remove owned projects before removing the account.');
+        insist(assigned.size <= 150 && membershipRows.size <= 150, 409, 'Remove some project memberships first (maximum 150 in one removal).');
+        projects = assigned.docs; memberships = membershipRows.docs;
+        Object.assign(patch, { active: false });
+      }
+      if (p.collection === 'projects') {
+        const rows = await tx.get(db.collection('memberships').where('projectId', '==', p.id).limit(151));
+        insist(rows.size <= 150, 409, 'Remove some memberships first (maximum 150 in one removal).');
+        memberships = rows.docs; Object.assign(patch, { status: 'Archived', memberIds: [] });
+      }
+      if (p.collection === 'teams' || p.collection === 'departments') {
+        const field = p.collection === 'teams' ? 'teamId' : 'departmentId';
+        const linkedUsers = await tx.get(db.collection('users').where(field, '==', p.id).limit(201));
+        const linkedProjects = p.collection === 'teams' ? await tx.get(db.collection('projects').where('teamId', '==', p.id).limit(201)) : null;
+        insist(linkedUsers.size < 201 && !linkedUsers.docs.some(d => !d.data().deletedAt) && (!linkedProjects || linkedProjects.size < 201 && !linkedProjects.docs.some(d => !d.data().deletedAt)), 409, 'Reassign or remove associated employees and projects before removing this group.');
+      }
+      if (p.collection === 'reports') {
+        tx.create(ref.collection('revisions').doc(String(data.version)), { version: data.version, report: data, actorId: user.id, action: 'Removed', createdAt: now() });
+        Object.assign(patch, { version: data.version + 1, updatedAt: now() });
+      }
+      for (const row of memberships) tx.delete(row.ref);
+      for (const row of projects) tx.update(row.ref, { memberIds: FieldValue.arrayRemove(p.id), updatedAt: now() });
+      tx.update(ref, patch); audit(tx, user.id, 'record.removed', ref.path, { reason: p.reason, label, membershipsRemoved: memberships.length });
+      return { ok: true };
+    });
+  }
   if (action === 'settings.save') {
     const p = policySchema.parse(payload);
     return transaction(async tx => { tx.set(db.doc('settings/organization'), p); audit(tx, user.id, action, 'organization', p); return { ok: true }; });
   }
   if (action === 'group.save') {
     const p = z.object({ type: z.enum(['teams', 'departments']), id: idSchema.optional(), name: z.string().trim().min(2).max(200) }).parse(payload); const id = p.id ?? randomUUID();
-    return transaction(async tx => { tx.set(db.doc(`${p.type}/${id}`), { name: p.name, id }); audit(tx, user.id, action, id); return { ok: true, id }; });
+    return transaction(async tx => { const ref = db.doc(`${p.type}/${id}`); const existing = await tx.get(ref); insist(!existing.data()?.deletedAt, 409, 'Restore this group from the Recycle Bin first.'); tx.set(ref, { name: p.name, id }); audit(tx, user.id, action, id); return { ok: true, id }; });
   }
   if (action === 'user.save') {
     const p = z.object({ id: idSchema, profile: profileSchema }).parse(payload);
     return transaction(async tx => {
       const ref = db.doc(`users/${p.id}`); const existing = await tx.get(ref); insist(existing.exists, 404, 'Employee not found.');
+      insist(!existing.data()?.deletedAt, 409, 'Restore this employee from the Recycle Bin before editing.');
       insist(existing.data()!.email === p.profile.email, 422, 'Work email is immutable; invite a new account to change identity.');
       insist(p.id !== user.id || p.profile.active && p.profile.role === 'admin', 409, 'You cannot deactivate or demote yourself.');
       const refs = [['teams', p.profile.teamId], ['departments', p.profile.departmentId], ['users', p.profile.managerId]].filter(([, id]) => id);
       const related = await Promise.all(refs.map(([collection, id]) => tx.get(db.doc(`${collection}/${idSchema.parse(id)}`))));
-      insist(related.every(s => s.exists), 422, 'Team, department or manager does not exist.');
+      insist(related.every(s => s.exists && !s.data()?.deletedAt), 422, 'Team, department or manager does not exist or was removed.');
       const manager = related.find(s => s.ref.parent.id === 'users');
       insist(!manager || manager.id !== p.id && manager.data()!.active && ['manager', 'admin'].includes(manager.data()!.role), 422, 'Select an active manager or administrator other than the employee.');
       tx.update(ref, p.profile); audit(tx, user.id, 'user.updated', p.id, { role: p.profile.role, active: p.profile.active }); return { ok: true };
@@ -181,11 +244,12 @@ export async function dispatch(user: UserProfile, raw: unknown) {
     }
     await transaction(async tx => {
       const ref = db.doc(`users/${uid}`); const old = await tx.get(ref);
+      insist(!old.data()?.deletedAt, 409, 'This account was removed. Restore it from the Recycle Bin instead of inviting again.');
       insist(!old.exists || old.data()!.email.toLowerCase() === p.email.toLowerCase(), 409, 'Employee identity conflict.');
       if (old.exists) return { ok: true, id: uid };
       const refs = [['teams', p.teamId], ['departments', p.departmentId], ['users', p.managerId]].filter(([, id]) => id);
       const related = await Promise.all(refs.map(([c, id]) => tx.get(db.doc(`${c}/${idSchema.parse(id)}`))));
-      insist(related.every(s => s.exists), 422, 'Team, department or manager does not exist.');
+      insist(related.every(s => s.exists && !s.data()?.deletedAt), 422, 'Team, department or manager does not exist or was removed.');
       const manager = related.find(s => s.ref.parent.id === 'users'); insist(!manager || manager.data()!.active && ['manager', 'admin'].includes(manager.data()!.role), 422, 'Select an active manager.');
       tx.create(ref, { ...p, email: p.email.toLowerCase(), id: uid, createdAt: now() }); audit(tx, user.id, 'user.invited', uid, { role: p.role }); return { ok: true, id: uid };
     });

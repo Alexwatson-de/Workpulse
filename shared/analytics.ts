@@ -1,9 +1,9 @@
 import { hours, workingDay, type Policy, type Report, type UserProfile } from './domain';
 export function dateRange(from: string, to: string) { const dates: string[] = []; if (from > to) return dates; const d = new Date(`${from}T12:00:00Z`); for (let i = 0; i < 367 && d.toISOString().slice(0, 10) <= to; i++, d.setUTCDate(d.getUTCDate() + 1)) dates.push(d.toISOString().slice(0, 10)); return dates; }
 export function summarize(reports: Report[], roster: UserProfile[], policy: Policy, from: string, to: string) {
-  const employees = roster.filter(u => u.active); const dates = dateRange(from, to); const days = dates.filter(d => workingDay(d, policy));
+  const employees = roster.filter(u => u.active && !u.deletedAt); const dates = dateRange(from, to); const days = dates.filter(d => workingDay(d, policy));
   const eligible = (date: string) => employees.filter(u => u.createdAt.slice(0, 10) <= date);
-  const confirmed = reports.filter(r => r.date >= from && r.date <= to && r.status !== 'Draft');
+  const confirmed = reports.filter(r => !r.deletedAt && r.date >= from && r.date <= to && r.status !== 'Draft');
   const series = dates.map(date => { const expected = workingDay(date, policy) ? eligible(date).length : 0; const today = confirmed.filter(r => r.date === date); const eligibleIds = new Set(eligible(date).map(u => u.id)); const complete = expected ? new Set(today.filter(r => eligibleIds.has(r.employeeId)).map(r => r.employeeId)).size : 0;
     return { date, expected, submitted: today.length, completed: complete, missing: Math.max(0, expected - complete), rate: expected ? Math.round(complete / expected * 100) : 0, regular: today.reduce((n, r) => n + hours(r).regular, 0), additional: today.reduce((n, r) => n + hours(r).additional, 0), late: today.filter(r => r.late).length };
   });
