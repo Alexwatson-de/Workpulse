@@ -16,7 +16,7 @@ Only production has cloud environment variables. Preview deployments need separa
 
 ## Implementation
 
-- Invitation-only application access; email/password login, password reset, protected routes, inactive-account handling, and profile editing.
+- Invitation-only application access; email/password and Google sign-in, password reset, protected routes, inactive-account handling, and profile editing.
 - Employee, directly assigned manager, and administrator authorization. Firestore scopes reads; the trusted API owns all writes. No client can promote itself or write reports, reviews, revisions, settings, or audit events directly.
 - Daily reports with configurable attendance, date policies, multiple searchable assigned-project entries, quarter-hour inputs, duplicate/reorder/collapse controls, descriptions, questions, deliverables, blockers, secondary tasks, and additional notes.
 - Confirmed Firestore draft saving, in-tab recovery, complete preview, transactional submission, deterministic employee/date IDs, optimistic version checks, and idempotent retries. Secondary-task hours count as regular hours, not invisible extra time.
@@ -27,6 +27,12 @@ Only production has cloud environment variables. Preview deployments need separa
 - Recipient-only notifications and persistent preferences. Deadline/missing reminders respect timezone, working days and holidays, are deduplicated, and refresh every five minutes while the tab is visible.
 - Responsive sidebar, mobile navigation, keyboard focus-trapped dialogs, accessible labels, validation alerts, toasts, skeletons, empty states and real database-derived metrics.
 - Reference-inspired Frost theme: blue/lilac glass canvas, dark ink, cobalt focus card, rounded panels, a 7/14-day activity view, team shortcuts, pastel project tiles and a contextual right rail. All tiles/actions are wired to real authorized records. Dialogs are rendered outside transformed cards, with the background inert and keyboard focus contained.
+
+## Google sign-in
+
+**Continue with Google** is an additional sign-in option on the existing login screen. Choose the Google account with the same work email as the invitation. The Firebase Google provider was already enabled for `workpulse-13227`; its OAuth secrets remain managed by Firebase, not bundled into the app. The production hostname is already an authorized domain.
+
+The existing UID-based profile gate and all role/active/removal checks remain unchanged. Google sign-in does not create WorkPulse profiles, assign roles, authorize whole email domains, reactivate accounts, or grant access to uninvited users. Firebase handles matching Google identities to existing email accounts; credential conflicts are surfaced without bypassing account ownership. Password sign-in/reset, the Frost theme, and application workflows are unchanged. Allow pop-ups for WorkPulse if the browser blocks the account chooser.
 
 ## Admin removal and recovery
 
@@ -117,7 +123,7 @@ Managers are deliberately restricted to their direct reporting line, not everyon
 
 ## Tests
 
-Local verification on 2026-10-16: **111 tests passed** — 48 domain/HTTP boundary tests, 16 Firestore rule tests, 31 backend emulator tests (including 15 removal/recovery tests), and 16 desktop/mobile browser workflows (including six lifecycle/theme checks). TypeScript and the production build passed. Lockfile installation validation passed. The runtime dependency audit reported zero vulnerabilities; upstream development-tool advisories remain. This is local/emulator evidence, not a production deployment or a security certification.
+Local verification on 2026-10-16: **125 tests passed** — 59 domain/HTTP/Google-auth helper tests, 16 Firestore rule tests, 31 backend emulator tests (including 15 removal/recovery tests), and 19 desktop/mobile browser workflows (including Google popup identity reuse, uninvited-account denial, and cancellation via the Firebase Auth emulator). Real Google consent uses Google's interactive UI and is not replaced by emulator evidence. TypeScript and the production build passed. Lockfile installation validation passed. The runtime dependency audit reported zero vulnerabilities; upstream development-tool advisories remain. This is local/emulator evidence, not a production deployment or a security certification.
 
 ```sh
 npm run check                  # Domain tests + TypeScript + production build
