@@ -1,0 +1,12 @@
+.git
+.env
+.env.*
+*.pem
+service-account*.json
+credentials*.json
+node_modules
+test-results
+playwright-report
+artifacts
+*-debug.log
+.firebase

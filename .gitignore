@@ -11,3 +11,4 @@ test-results/
 service-account*.json
 credentials*.json
 .firebase/
+*.pem
