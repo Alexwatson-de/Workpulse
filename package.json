@@ -1,0 +1,48 @@
+{
+  "name": "workpulse",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build",
+    "test": "vitest run",
+    "test:rules": "firebase emulators:exec --project demo-workpulse --only firestore 'vitest run --config vitest.rules.config.ts'",
+    "test:e2e": "playwright test",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:firebase": "firebase emulators:exec --project demo-workpulse --only auth,firestore 'npm run test:rules:running && npm run test:integration && npm run test:browser:running'",
+    "test:rules:running": "vitest run --config vitest.rules.config.ts",
+    "test:browser:running": "tsx scripts/browser-check.ts",
+    "dev:api": "tsx --env-file=.env scripts/dev-api.ts",
+    "check": "npm run test && npm run build",
+    "bootstrap:admin": "tsx scripts/bootstrap-admin.ts"
+  },
+  "overrides": { "@grpc/grpc-js": "^1.14.6" },
+  "engines": { "node": ">=22.12.0" },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.1.0",
+    "firebase": "^13.0.0",
+    "firebase-admin": "^14.5.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.0.0",
+    "recharts": "^3.0.0",
+    "tailwindcss": "^4.1.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^6.0.0",
+    "@playwright/test": "^1.50.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vercel/node": "^24.0.2",
+    "@vitejs/plugin-react": "^6.1.2",
+    "firebase-tools": "^15.34.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.8.0",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.5"
+  }
+}

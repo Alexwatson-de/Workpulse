@@ -1,0 +1,52 @@
+import { describe, expect, it } from 'vitest';
+import { canEdit, canReadReport, canReview, csvCell, defaultPolicy, emptyReport, employeeImport, exportReports, hours, parseCsv, policySchema, previousWorkingDay, reportInputSchema, validateReport, zonedNow, type Project, type Report, type UserProfile } from '../shared/domain';
+import { aggregateSeries, summarize } from '../shared/analytics';
+const user: UserProfile = { id: 'alice', fullName: 'Alice Employee', email: 'alice@example.test', employeeId: 'E1', teamId: 'team', departmentId: 'dept', managerId: 'lead', role: 'employee', active: true, createdAt: '2026-10-01T00:00:00Z' };
+const lead = { ...user, id: 'lead', role: 'manager' as const };
+const project: Project = { id: 'p1', name: 'Platform', description: '', ownerId: 'lead', teamId: 'team', memberIds: ['alice'], startDate: '2026-01-01', endDate: '', status: 'Active' };
+const now = new Date('2026-10-16T17:00:00Z');
+const input = () => ({ ...emptyReport('2026-10-16'), entries: [{ id: 'entry1', projectId: 'p1', regularHours: 8, additionalHours: 1, description: 'Implemented the new reporting workflow and tested its permissions with our team.', questionCount: 4, miscellaneous: '', blockers: '', deliverableUrl: '' }] });
+const report = (): Report => ({ ...input(), id: 'alice_2026-10-16', employeeId: 'alice', employeeName: user.fullName, teamId: 'team', departmentId: 'dept', managerId: 'lead', projectIds: ['p1'], status: 'Submitted', version: 1, createdAt: now.toISOString(), updatedAt: now.toISOString(), submittedAt: now.toISOString(), late: false, feedback: '', reviewerId: '' });
+describe('trusted reporting invariants', () => {
+  it('accepts valid multi-project work without mutating input', () => { const r = input(); const original = JSON.stringify(r); expect(validateReport(r, defaultPolicy, [project], 'alice', true, now)).toEqual([]); expect(JSON.stringify(r)).toBe(original); });
+  it('counts secondary work against regular limit', () => { const r = input(); r.secondary = { ...r.secondary, assigned: true, name: 'Support', description: 'Helped resolve support tickets', hours: 1 }; expect(hours(r).regular).toBe(9); expect(validateReport(r, defaultPolicy, [project], 'alice', true, now).join(' ')).toContain('exceed'); });
+  it('rejects unassigned projects even on drafts', () => expect(validateReport(input(), defaultPolicy, [{ ...project, memberIds: [] }], 'alice', false, now).join(' ')).toContain('assignment'));
+  it('rejects archived projects unless policy permits', () => expect(validateReport(input(), defaultPolicy, [{ ...project, status: 'Archived' }], 'alice', true, now).length).toBeGreaterThan(0));
+  it('rejects project work outside assignment dates', () => expect(validateReport(input(), defaultPolicy, [{ ...project, endDate: '2026-10-15' }], 'alice', true, now).join(' ')).toContain('outside'));
+  it('enforces daily limits across multiple project entries', () => { const r = input(); r.entries.push({ ...r.entries[0], id: 'two', regularHours: 1 }); expect(validateReport(r, defaultPolicy, [project], 'alice', true, now).join(' ')).toContain('exceed'); });
+  it('enforces additional limit', () => { const r = input(); r.entries[0].additionalHours = 7; expect(validateReport(r, defaultPolicy, [project], 'alice', true, now).join(' ')).toContain('Additional'); });
+  it('permits leave with no project hours by default', () => expect(validateReport({ ...emptyReport('2026-10-16'), attendance: 'On Leave / Off' }, defaultPolicy, [], 'alice', true, now)).toEqual([]));
+  it('supports policy requiring hours on leave days', () => expect(validateReport({ ...emptyReport('2026-10-16'), attendance: 'On Leave / Off' }, { ...defaultPolicy, leaveRequiresHours: true }, [], 'alice', true, now).length).toBeGreaterThan(0));
+  it('requires enough description words only on submission', () => { const r = input(); r.entries[0].description = 'Short note'; expect(validateReport(r, defaultPolicy, [project], 'alice', false, now)).toEqual([]); expect(validateReport(r, defaultPolicy, [project], 'alice', true, now).join(' ')).toContain('10 words'); });
+  it('rejects historical dates outside policy', () => { const r = input(); r.date = '2026-09-01'; expect(validateReport(r, defaultPolicy, [project], 'alice', true, now).join(' ')).toContain('last 7'); });
+  it('rejects future dates', () => { const r = input(); r.date = '2026-10-17'; expect(validateReport(r, defaultPolicy, [project], 'alice', true, now).length).toBeGreaterThan(0); });
+  it('rejects unsupported attendance choices', () => expect(validateReport({ ...input(), attendance: 'Verified present' }, defaultPolicy, [project], 'alice', true, now).length).toBeGreaterThan(0));
+  it('rejects duplicate project-entry IDs', () => { const r = input(); r.entries.push({ ...r.entries[0], regularHours: 0, additionalHours: 0 }); expect(validateReport(r, defaultPolicy, [project], 'alice', true, now).join(' ')).toContain('unique'); });
+  it.each([-1, Infinity, NaN, 25])('rejects malformed hours %s', n => { const r = input(); r.entries[0].regularHours = n; expect(reportInputSchema.safeParse(r).success).toBe(false); });
+  it('rejects fractional question counts and unsafe deliverables', () => { const r = input(); r.entries[0].questionCount = 1.2; r.entries[0].deliverableUrl = 'javascript:alert(1)'; expect(reportInputSchema.safeParse(r).success).toBe(false); });
+  it('rejects invalid calendar dates', () => expect(reportInputSchema.safeParse({ ...input(), date: '2026-02-30' }).success).toBe(false));
+  it('enforces additional required fields', () => expect(validateReport(input(), { ...defaultPolicy, requiredFields: ['nextDay', 'deliverableUrl'] }, [project], 'alice', true, now)).toHaveLength(2));
+});
+describe('role boundaries', () => {
+  it('employee sees only own reports', () => { expect(canReadReport(user, report())).toBe(true); expect(canReadReport({ ...user, id: 'other' }, report())).toBe(false); });
+  it('manager scope follows direct manager, not shared team', () => { expect(canReadReport(lead, report())).toBe(true); expect(canReadReport({ ...lead, id: 'outsider' }, report())).toBe(false); });
+  it('deactivated users have no report access', () => expect(canReadReport({ ...lead, active: false }, report())).toBe(false));
+  it('employees and self-reviewing administrators cannot review', () => { expect(canReview(user, report())).toBe(false); expect(canReview({ ...user, role: 'admin' }, report())).toBe(false); expect(canReview(lead, report())).toBe(true); });
+  it('locks approved reports regardless of submitted-edit policy', () => expect(canEdit(user, { ...report(), status: 'Approved' }, { ...defaultPolicy, editSubmitted: true })).toBe(false));
+  it('allows corrections but never editing another employee report', () => { expect(canEdit(user, { ...report(), status: 'Changes Requested' }, defaultPolicy)).toBe(true); expect(canEdit(lead, { ...report(), status: 'Draft' }, defaultPolicy)).toBe(false); });
+});
+describe('calendar, exports and imports', () => {
+  it('uses organizational timezone, not browser date', () => expect(zonedNow('Asia/Kolkata', new Date('2026-10-16T23:00:00Z')).date).toBe('2026-10-17'));
+  it('skips weekends and holidays', () => expect(previousWorkingDay('2026-10-19', { ...defaultPolicy, holidays: ['2026-10-16'] })).toBe('2026-10-15'));
+  it('rejects invalid timezone and combined limits', () => { expect(policySchema.safeParse({ ...defaultPolicy, timezone: 'Not/AZone' }).success).toBe(false); expect(policySchema.safeParse({ ...defaultPolicy, regularLimit: 20 }).success).toBe(false); });
+  it.each(['=SUM(A1:A4)', '+cmd', '-2+1', '@SUM(A1)', '  =1+1', '\tcommand'])('neutralizes spreadsheet formula %s', text => expect(csvCell(text).startsWith('"\'')).toBe(true));
+  it('parses quoted multiline CSV', () => expect(parseCsv('name,note\r\nAlice,"A, B\nC"\r\n')).toEqual([['name', 'note'], ['Alice', 'A, B\nC']]));
+  it('rejects malformed CSV quotes', () => expect(() => parseCsv('email\n"unclosed')).toThrow());
+  it('validates employee import and duplicate identities', () => { const rows = employeeImport('fullName,email,employeeId\nAlice Smith,alice@example.test,E1\nAlice Smith,alice@example.test,E2\nWrong,no-email,E3'); expect(rows[0].error).toBe(''); expect(rows[1].error).toContain('Duplicate'); expect(rows[2].data).toBeNull(); });
+  it('exports leave reports and counts secondary hours only once', () => { const r = report(); r.secondary = { ...r.secondary, assigned: true, name: 'Help', hours: 2 }; r.entries.push({ ...r.entries[0], id: 'two' }); const rows = parseCsv(exportReports([r, { ...r, entries: [], attendance: 'On Leave / Off' }])); expect(rows).toHaveLength(4); expect(rows[1][9]).toBe('2'); expect(rows[2][9]).toBe('0'); });
+});
+describe('record-derived analytics', () => {
+  it('excludes drafts and holidays from expected completion', () => { const m = summarize([report(), { ...report(), id: 'draft', status: 'Draft', date: '2026-10-15' }], [user], defaultPolicy, '2026-10-15', '2026-10-18'); expect(m.confirmed).toHaveLength(1); expect(m.expected).toBe(2); expect(m.rate).toBe(50); expect(m.regular).toBe(8); });
+  it('does not expect reports before employment creation', () => expect(summarize([], [{ ...user, createdAt: '2026-10-16T10:00:00Z' }], defaultPolicy, '2026-10-15', '2026-10-16').expected).toBe(1));
+  it('aggregates weekly and monthly rates from denominators', () => { const m = summarize([report()], [user], defaultPolicy, '2026-10-15', '2026-10-16'); expect(aggregateSeries(m.series, 'monthly')[0].rate).toBe(50); expect(aggregateSeries(m.series, 'weekly')).toHaveLength(1); });
+});

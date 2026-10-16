@@ -1,0 +1,40 @@
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { assertFails, assertSucceeds, initializeTestEnvironment, type RulesTestEnvironment } from '@firebase/rules-unit-testing';
+import { collection, doc, getDoc, getDocs, query, setDoc, where, updateDoc, deleteDoc } from 'firebase/firestore';
+import { readFileSync } from 'node:fs';
+let env: RulesTestEnvironment;
+beforeAll(async () => {
+  env = await initializeTestEnvironment({ projectId: 'demo-workpulse', firestore: { host: '127.0.0.1', port: 8088, rules: readFileSync('firestore.rules', 'utf8') } });
+  await env.withSecurityRulesDisabled(async c => {
+    const db = c.firestore();
+    for (const [id, role, managerId, active] of [['alice', 'employee', 'lead', true], ['bob', 'employee', 'other', true], ['lead', 'manager', '', true], ['other', 'manager', '', true], ['admin', 'admin', '', true], ['inactive', 'admin', '', false]] as const) await setDoc(doc(db, 'users', id), { role, managerId, active, teamId: 'shared' });
+    await setDoc(doc(db, 'reports', 'alice_day'), { employeeId: 'alice', managerId: 'lead', teamId: 'shared', status: 'Submitted' });
+    await setDoc(doc(db, 'reports', 'bob_day'), { employeeId: 'bob', managerId: 'other', teamId: 'shared', status: 'Submitted' });
+    await setDoc(doc(db, 'reports', 'alice_day', 'revisions', '1'), { report: { status: 'Draft' } });
+    await setDoc(doc(db, 'reports', 'alice_day', 'comments', '1'), { text: 'Please clarify.' });
+    await setDoc(doc(db, 'projects', 'assigned'), { memberIds: ['alice'], ownerId: 'lead' });
+    await setDoc(doc(db, 'notifications', 'alice_notice'), { userId: 'alice' });
+    await setDoc(doc(db, 'auditEvents', 'event'), { action: 'seed' });
+    await setDoc(doc(db, 'operations', 'private'), { userId: 'alice' });
+  });
+});
+afterAll(async () => { await env?.cleanup(); });
+const db = (id?: string) => id ? env.authenticatedContext(id).firestore() : env.unauthenticatedContext().firestore();
+describe('Firestore database authorization', () => {
+  it('allows checking an absent own daily report, not another employee missing report', async () => { const s = await assertSucceeds(getDoc(doc(db('alice'), 'reports', 'alice_2026-10-01'))); expect(s.exists()).toBe(false); await assertFails(getDoc(doc(db('alice'), 'reports', 'bob_2026-10-01'))); });
+  it('denies anonymous employee and report access', async () => { await assertFails(getDoc(doc(db(), 'users', 'alice'))); await assertFails(getDocs(collection(db(), 'reports'))); });
+  it('employee can read own profile and report', async () => { await assertSucceeds(getDoc(doc(db('alice'), 'users', 'alice'))); await assertSucceeds(getDoc(doc(db('alice'), 'reports', 'alice_day'))); });
+  it('employee cannot read another employee profile or report', async () => { await assertFails(getDoc(doc(db('alice'), 'users', 'bob'))); await assertFails(getDoc(doc(db('alice'), 'reports', 'bob_day'))); });
+  it('employee cannot list profiles or unscoped reports', async () => { await assertFails(getDocs(collection(db('alice'), 'users'))); await assertFails(getDocs(collection(db('alice'), 'reports'))); });
+  it('allows an owner-scoped report query', async () => { const s = await assertSucceeds(getDocs(query(collection(db('alice'), 'reports'), where('employeeId', '==', 'alice')))); expect(s.size).toBe(1); });
+  it('manager can query assigned employee reports', async () => { const s = await assertSucceeds(getDocs(query(collection(db('lead'), 'reports'), where('managerId', '==', 'lead')))); expect(s.size).toBe(1); });
+  it('manager cannot use shared team to access another manager employees', async () => { await assertFails(getDoc(doc(db('lead'), 'reports', 'bob_day'))); await assertFails(getDoc(doc(db('lead'), 'users', 'bob'))); });
+  it('administrator can query all users and reports', async () => { await assertSucceeds(getDocs(collection(db('admin'), 'reports'))); await assertSucceeds(getDocs(collection(db('admin'), 'users'))); });
+  it('deactivated administrator has no report access', async () => { await assertFails(getDoc(doc(db('inactive'), 'reports', 'alice_day'))); });
+  it('prevents self-elevation, profile creation and direct report writes', async () => { await assertFails(updateDoc(doc(db('alice'), 'users', 'alice'), { role: 'admin' })); await assertFails(setDoc(doc(db('alice'), 'users', 'new'), { role: 'admin', active: true })); await assertFails(updateDoc(doc(db('alice'), 'reports', 'alice_day'), { status: 'Approved' })); });
+  it('even administrators cannot bypass trusted audit and validation', async () => { await assertFails(setDoc(doc(db('admin'), 'reports', 'forged'), { status: 'Approved' })); await assertFails(deleteDoc(doc(db('admin'), 'auditEvents', 'event'))); });
+  it('restricts immutable revision and comment reads to report scope', async () => { await assertSucceeds(getDoc(doc(db('alice'), 'reports', 'alice_day', 'revisions', '1'))); await assertFails(getDoc(doc(db('bob'), 'reports', 'alice_day', 'revisions', '1'))); await assertFails(setDoc(doc(db('alice'), 'reports', 'alice_day', 'comments', 'forged'), { text: 'admin' })); });
+  it('restricts projects by assignment or ownership', async () => { await assertSucceeds(getDoc(doc(db('alice'), 'projects', 'assigned'))); await assertSucceeds(getDoc(doc(db('lead'), 'projects', 'assigned'))); await assertFails(getDoc(doc(db('bob'), 'projects', 'assigned'))); });
+  it('restricts notifications to recipient', async () => { await assertSucceeds(getDoc(doc(db('alice'), 'notifications', 'alice_notice'))); await assertFails(getDoc(doc(db('admin'), 'notifications', 'alice_notice'))); await assertFails(updateDoc(doc(db('alice'), 'notifications', 'alice_notice'), { read: true })); });
+  it('hides audit logs from managers and operation records from all clients', async () => { await assertFails(getDoc(doc(db('lead'), 'auditEvents', 'event'))); await assertSucceeds(getDoc(doc(db('admin'), 'auditEvents', 'event'))); await assertFails(getDoc(doc(db('admin'), 'operations', 'private'))); });
+});

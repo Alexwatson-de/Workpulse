@@ -1,0 +1,51 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function active() {
+      return request.auth != null && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.active == true;
+    }
+    function admin() { return active() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'; }
+    function manager() { return active() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'manager'; }
+    function reportAccess(data) { return active() && (admin() || data.employeeId == request.auth.uid || manager() && data.managerId == request.auth.uid); }
+    // Every mutation is validated by the authenticated, role-checking trusted API.
+    // Clients cannot write even their own roles, reports, revision history or audit records.
+    match /users/{id} {
+      allow get: if request.auth != null && id == request.auth.uid || admin() || manager() && resource.data.managerId == request.auth.uid;
+      allow list: if admin() || manager() && resource.data.managerId == request.auth.uid;
+      allow write: if false;
+    }
+    match /projects/{id} {
+      allow read: if active() && (admin() || request.auth.uid in resource.data.memberIds || manager() && resource.data.ownerId == request.auth.uid);
+      allow write: if false;
+    }
+    match /memberships/{id} {
+      allow read: if active() && (admin() || resource.data.userId == request.auth.uid || manager() && resource.data.ownerId == request.auth.uid);
+      allow write: if false;
+    }
+    function ownReportId(id) {
+      let date = id.split('_')[id.split('_').size() - 1];
+      return id == request.auth.uid + '_' + date && date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+    }
+    match /reports/{id} {
+      // A new report starts with an authorized read of its absent deterministic ID.
+      allow get: if active() && ownReportId(id) || reportAccess(resource.data);
+      allow list: if reportAccess(resource.data);
+      allow write: if false;
+      match /{collection}/{version} {
+        allow read: if collection in ['revisions', 'comments'] && reportAccess(get(/databases/$(database)/documents/reports/$(id)).data);
+        allow write: if false;
+      }
+    }
+    match /notifications/{id} {
+      allow read: if active() && resource.data.userId == request.auth.uid;
+      allow write: if false;
+    }
+    match /notificationPreferences/{id} { allow read: if active() && id == request.auth.uid; allow write: if false; }
+    match /settings/{id} { allow read: if active() && id == 'organization'; allow write: if false; }
+    match /teams/{id} { allow read: if active(); allow write: if false; }
+    match /departments/{id} { allow read: if active(); allow write: if false; }
+    match /auditEvents/{id} { allow read: if admin(); allow write: if false; }
+    match /{document=**} { allow read, write: if false; }
+  }
+}
