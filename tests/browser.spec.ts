@@ -11,6 +11,8 @@ test('employee saves draft, validates hours, submits and manager approves', asyn
   await page.reload(); await expect(page.getByLabel('Regular hours', { exact: true })).toHaveValue('7');
   await page.getByRole('button', { name: 'Preview & submit' }).click(); await expect(page.getByRole('dialog')).toContainText('7 regular'); await page.getByRole('button', { name: 'Confirm submission' }).click();
   await expect(page).toHaveURL(/history\//); await expect(page.locator('main').getByText('Submitted', { exact: true })).toBeVisible(); await page.getByRole('button', { name: 'Sign out' }).click();
+  // Wait for Firebase's asynchronous sign-out before navigating to another sign-in.
+  await expect(page).toHaveURL(/login/); await expect(page.getByLabel('Work email')).toBeVisible();
   await signIn(page, 'manager'); await page.getByRole('link', { name: 'Review queue', exact: true }).click();
   await page.getByRole('link', { name: 'View →' }).first().click(); await page.getByLabel('Review comment').fill('Clear progress. Thank you for the update.'); await page.getByRole('button', { name: 'Approve report', exact: true }).click();
   await expect(page.locator('main').getByText('Approved', { exact: true })).toBeVisible(); await expect(page.getByRole('button', { name: 'Version 1', exact: false })).toBeVisible();

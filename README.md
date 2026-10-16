@@ -2,6 +2,18 @@
 
 A single-organization employee reporting platform: React + TypeScript + Vite, Tailwind CSS, Firebase Authentication, Cloud Firestore, a trusted Vercel Node.js API, Recharts, and Lucide. Attendance and hours are **employee-reported**, not independent evidence of attendance or actual time worked.
 
+## Live deployment (2026-10-16)
+
+- Production: https://workpulse-lake-three.vercel.app
+- Repository: https://github.com/Alexwatson-de/Workpulse (`main`, Vercel Git integration enabled).
+- Firebase: `workpulse-13227`; new default Standard Firestore database in `us-central1`, deletion protection enabled, restrictive rules deployed and composite indexes verified READY. Email/password Auth enabled; the production hostname is authorized.
+- Initial administrator: `dhruv.bansal@softage.ai`. Firebase accepted the password-reset/setup email request. Use the email link or **Forgot your password?**; inbox delivery cannot be verified by the application.
+- Vercel: `dhruv-820e/workpulse`, existing Hobby team explicitly requested by the owner. No billing plan was changed. See the service-plan restriction below; successful hosting does not establish eligibility under Vercel's terms.
+- Server identity: dedicated `workpulse-vercel` service account with `roles/datastore.user` and `roles/firebaseauth.admin`. Server credentials are sensitive production-only Vercel variables. Local values live in ignored owner-readable `.env`; the tracked template is blank and `.vercelignore` excludes all environment files.
+- Live verification passed: synthetic-role sign-in, protected routes, employee draft/preview/submission, manager correction/resubmission/approval, immutable revisions, cross-user read denial, privileged API denial, inactive-user denial, responsive layout and no uncaught browser errors. Synthetic accounts were disabled, tokens revoked and the test project archived; clearly labeled synthetic reports/audit records remain and are not actual employee work.
+
+Only production has cloud environment variables. Preview deployments need separately approved origins/configuration before use. RoomSync and Forum were not modified.
+
 ## Implementation
 
 - Invitation-only application access; email/password login, password reset, protected routes, inactive-account handling, and profile editing.
@@ -17,7 +29,7 @@ A single-organization employee reporting platform: React + TypeScript + Vite, Ta
 
 ## Run locally
 
-Use Node 24 (minimum 22.12). Install dependencies with `npm ci`. Copy [.env.example](.env.example) to a locally ignored `.env` and fill in the approved Firebase project's identifiers and server credentials. Never paste administrative credentials into source or public environment variables.
+Use Node 24. Install dependencies with `npm ci`. Copy [.env.example](.env.example) to a locally ignored `.env` and fill in the approved Firebase project's identifiers and server credentials. Never paste administrative credentials into source or public environment variables. For local development set `APP_ORIGIN=http://127.0.0.1:5173`; the production value must remain the exact production hostname.
 
 Run in two terminals:
 
@@ -106,7 +118,7 @@ With emulators already running, use `npm run test:rules:running`, `npm run test:
 
 ## GitHub and Vercel deployment
 
-Deployment is intentionally pending an authorized GitHub `owner/repository`, Firebase project, initial-administrator identity, and approved Vercel business-use target. No existing remote was repurposed. No GitHub token has been stored or used. Revoke any token exposed in chat and authenticate using GitHub CLI's browser/keychain flow or an approved integration.
+The authorized repository is now pushed and connected to Vercel. Existing macOS Git credentials were used through the credential helper; the token previously pasted in chat was not used or stored. Revoke any token exposed in chat. The following procedure remains the redeployment/operator checklist.
 
 1. Inspect the specified remote and branch before pushing. If it already contains work, fetch and integrate WorkPulse on a feature branch; do not force-push or replace unrelated commits. If it is a new empty authorized repository, add its remote and push the local application branch.
 2. In Vercel link/import that authorized repository, select Vite, set the root to the application root, build command `npm run build`, install command `npm ci`, output `dist`, and Node 24. [vercel.json](vercel.json) includes SPA routing that preserves `/api`, security headers, and the trusted API function.
@@ -123,7 +135,9 @@ The architecture does not intrinsically need Firebase Blaze: Auth + Firestore + 
 
 ## Boundaries and operational limitations
 
-- No production Firebase rules/indexes deployment, repository push, Vercel project creation/deployment, or production smoke test has occurred without the missing target authorization/configuration.
+- Production deployment and smoke checks are complete for the explicitly authorized targets above. Plan eligibility remains an owner responsibility; no business-use eligibility claim is made for Hobby.
+- Vercel's Node runtime did not support the CommonJS-to-ESM import used by `jwks-rsa` 4.x / `jose` 6.x. The Firebase Admin dependency is narrowly overridden to `jwks-rsa` 3.2.2, tested against live Firebase token verification and audited with zero runtime vulnerabilities. Reevaluate this override when the upstream runtime/library compatibility changes.
+- The lockfile includes cross-platform WASM transitive dependencies required by cloud npm 12. Older npm installations may prune them during lockfile rewrites: validate clean Linux-targeted `npm ci` with the deployment npm version before committing dependency changes.
 - In-app reminders run while the application is open/visible; no background scheduler, email-notification service, or push delivery is configured. Existing notification records remain durable.
 - Optional AI assistance is deliberately disabled: no WorkPulse-specific provider, employee-data consent or API credentials were authorized. RoomSync's AI configuration was not reused.
 - Exports are UTF-8 BOM CSV readable by Excel, not native `.xlsx` workbooks.
